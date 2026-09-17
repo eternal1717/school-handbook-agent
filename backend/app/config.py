@@ -121,6 +121,13 @@ class Settings(BaseSettings):
     # ---------- 可观测 ----------
     trace_enabled: bool = True
 
+    # ---------- 规章结构化（规则 + 流程抽取）----------
+    # 检索层回答「哪条这么规定」，这一层回答「我这情况会不会触发它」和「按什么顺序去办」。
+    # 抽取结果是纯派生的缓存（纯正则、可复现），删掉会自动重建，不进 Git。
+    rulebook_enabled: bool = True
+    rulebook_path: str = "./data/rulebook.json"
+    rulebook_match_top_n: int = 6   # 情境诊断一次最多返回几条规则
+
     # ---------- 增量去重（新增文档时只补差异部分）----------
     # 默认只开精确去重。实测（tests/calibrate_dedup.py）：
     #   完全相同              → 1.0000
@@ -171,6 +178,11 @@ class Settings(BaseSettings):
     @property
     def bm25_path(self) -> Path:
         p = Path(self.bm25_index_path)
+        return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
+
+    @property
+    def rulebook_path_resolved(self) -> Path:
+        p = Path(self.rulebook_path)
         return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
 
     def thinking_for(self, purpose: str) -> bool:

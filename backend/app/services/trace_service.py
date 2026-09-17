@@ -47,6 +47,9 @@ class TraceRecorder:
         self.source_count = 0
         self.answer_chars = 0
         self.refused = False
+        # 本轮检索的最高向量相似度。这是「这次检索到底靠不靠谱」的最直接信号，
+        # 既用于自省触发判断，也随 done 事件回给前端展示。
+        self.max_similarity = 0.0
 
     # ---------------- 记录 ----------------
 

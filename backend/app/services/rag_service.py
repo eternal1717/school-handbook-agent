@@ -512,6 +512,7 @@ async def answer_stream(
             max_similarity = _max_similarity(top_hits)
 
         recorder.hops = hops
+        recorder.max_similarity = max_similarity
 
         # ===== [7] 拒答判定 =====
         # 两种情况拒答：一条都没检索到；或者检索明显偏弱。
@@ -671,6 +672,14 @@ async def _finish(
         source_count=len(sources),
         refused=refused,
         total_ms=recorder.elapsed_ms(),
+        # 检索质量指标。前端拿它提示「这次检索有多可信」——
+        # 相似度低但硬答，和相似度高、资料扎实，风险完全不同，这个信息不该藏着。
+        max_similarity=round(recorder.max_similarity, 4),
+        # 带上各阶段的真实耗时，让前端用它替换界面上的数字。
+        # 前端本来是按「相邻 stage 事件的到达时间差」估算的，但 SSE 事件会成批到达，
+        # 估算值会离谱到「理解问题 0ms、筛选条款 9 秒」——实测踩过。
+        # 后端这里本来就是真实计时，顺手带上比让前端去猜可靠得多。
+        stages=recorder.stages,
     )
 
 

@@ -57,6 +57,7 @@ def read_sse(client: TestClient, question: str, conversation_id: str | None = No
     answer = "".join(e["content"] for e in events if e["type"] == "token")
     sources = next((e["sources"] for e in events if e["type"] == "sources"), [])
     meta = [e for e in events if e["type"] == "meta"]
+    done = [e for e in events if e["type"] == "done"]
     errors = [e["message"] for e in events if e["type"] == "error"]
     return {
         "answer": answer,
@@ -65,7 +66,9 @@ def read_sse(client: TestClient, question: str, conversation_id: str | None = No
         "errors": errors,
         "ended": any(e["type"] == "end" for e in events),
         "conversation_id": (meta[-1].get("conversation_id") if meta else None),
-        "max_similarity": (meta[-1].get("max_similarity") if meta else None),
+        # 检索质量指标随 done 事件回传（正常回答和拒答都有）。
+        # 早先是挂在 meta 上的，但 meta 只带会话标识，放这里更合语义。
+        "max_similarity": (done[-1].get("max_similarity") if done else None),
     }
 
 
@@ -133,7 +136,16 @@ def main() -> None:
         # 5. 手册外提问 → 拒答
         print("\n[5] 手册外提问（应拒答）")
         outside = read_sse(client, "红烧肉怎么做才好吃？", user_id="test_user")
-        check("触发拒答", "手册中未找到相关内容" in outside["answer"], outside["answer"][:60].replace("\n", " "))
+        # 拒答有两条路径：检索不到 → 硬拒答文案；被判成越界提问 → 分流说明。
+        # 两条都是「明确说自己答不了」，都该算通过。
+        # 只认死一句话会在行为优化后误报失败（实测踩过：越界提问现在会被
+        # 直接判成 out_of_scope 并给出更具体的说明，反而比原来那句通用文案更好）。
+        outside_text = outside["answer"]
+        check(
+            "触发拒答（硬拒答或越界分流）",
+            ("手册中未找到相关内容" in outside_text) or ("不在我的职责范围" in outside_text),
+            outside_text[:60].replace("\n", " "),
+        )
         check("拒答时不给来源", len(outside["sources"]) == 0)
 
         # 6. 短期记忆

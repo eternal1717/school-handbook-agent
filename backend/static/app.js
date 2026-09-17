@@ -2,11 +2,19 @@
  * 知津 · 校园规章智能问答 —— 前端逻辑
  * Vue 3 + Element Plus（本地 vendor 文件加载，免 npm 构建即可运行）
  *
- * 相比改造前，这一版新增四件事：
+ * 相比改造前，这一版新增：
  *   1. 思维链展示：把 reasoning 事件流式渲染进可折叠面板；
  *   2. 阶段流水：实时显示一次问答跑了哪些环节、各花多久；
  *   3. 来源溯源：来源卡片标出「向量 / 关键词 / 双路命中」，并可定位到原文块；
- *   4. 反馈与追踪：点赞点踩 + 链路详情页。
+ *   4. 反馈与追踪：点赞点踩 + 链路详情页；
+ *   5. 规则诊断：学生描述自己的情况 → 匹配规章条文 + 数值阈值比对；
+ *   6. 办事流程：从原文抽出的步骤时间线，可当待办清单勾选；
+ *   7. 主题切换：亮 / 暗双主题，跟随系统偏好并记住选择。
+ *
+ * 有一条贯穿全文件的取舍：**能用原生 DOM 就别用组件库**。
+ * Element Plus 只在表格、抽屉、下拉、提示这类「有复杂度」的地方用；
+ * 按钮、分段控件、输入框、标签全部手写。
+ * 原因是默认主题的视觉权重和这套设计系统冲突，覆写它的成本比自写还高。
  * ========================================================================= */
 const { createApp, ref, reactive, computed, watch, nextTick, onMounted } = Vue;
 const { ElMessage, ElMessageBox } = ElementPlus;
@@ -54,11 +62,55 @@ createApp({
     let controller = null;
 
     const suggestions = [
-      '学生请假需要办理什么手续？',
-      '第七十七条是怎么规定的？',
-      '考试违纪会受到什么处分？',
-      '奖学金是怎么评定的？',
+      { value: '学生请假需要办理什么手续？', tag: '规章' },
+      { value: '第七十七条是怎么规定的？', tag: '精确条号' },
+      { value: '考试违纪会受到什么处分？', tag: '处分' },
+      { value: '如果一个学期挂了好几门课，又缺课太多，会同时触发哪些处理？', tag: '多跳' },
+      { value: '奖学金是怎么评定的？', tag: '流程' },
+      { value: '保研需要什么条件？', tag: '该拒答' },
     ];
+
+    // ---------- 主题 ----------
+    // 首屏主题已由 index.html 里的内联脚本定好（避免闪一帧亮色），
+    // 这里只需读回来，之后靠 watch 同步到 <html>。
+    const theme = ref(document.documentElement.getAttribute('data-theme') || 'light');
+
+    function toggleTheme() {
+      theme.value = theme.value === 'dark' ? 'light' : 'dark';
+    }
+
+    watch(theme, (value) => {
+      document.documentElement.setAttribute('data-theme', value);
+      try {
+        localStorage.setItem('zhijin-theme', value);
+      } catch (error) {
+        /* 隐私模式写不了，忽略即可，本次会话内主题仍然生效 */
+      }
+    });
+
+    // ---------- 规则诊断 ----------
+    const ruleTab = ref('diagnose');
+    const ruleStats = ref({ rule_total: 0, procedure_total: 0, with_threshold: 0, chunk_total: 0, by_kind: {}, built_at: '' });
+    const diagInput = ref('');
+    const diagLoading = ref(false);
+    const diagResult = ref(null);
+    const diagExamples = ['我这学期挂了 3 门课，还缺课 20 学时', '我已经休学两次了，还能再休吗'];
+
+    const ruleKinds = ref({});
+    const ruleKind = ref('');
+    const ruleQuery = ref('');
+    const ruleList = ref([]);
+    const ruleListTotal = ref(0);
+
+    // ---------- 办事流程 ----------
+    const procedures = ref([]);
+    const procTotal = ref(0);
+    const procQuery = ref('');
+    const procLoading = ref(false);
+    const currentProc = ref(null);
+    // 勾选状态按「流程 id → 步骤下标集合」存，切换流程时各自保留。
+    // 不放进 currentProc 里，是因为 currentProc 会被重新赋值为新对象。
+    const stepChecks = ref({});
 
     // ---------- 通用工具 ----------
     function formatTime(value) {
@@ -109,6 +161,30 @@ createApp({
       return map[channelOf(source)] || '来源';
     }
 
+    // 阶段名 → 给人看的说法。
+    // 事件里（stage 事件）本来就带 label，但历史会话是从 trace 里回填的，
+    // 那里只有 stage 的机器名（understand / reflect_1 / retry_2 …），得在这里翻译一遍。
+    const STAGE_LABELS = {
+      understand: '理解问题',
+      plan: '理解问题',
+      agent: '多轮检索',
+      agent_loop: '多轮检索',
+      agent_retrieval: '多轮检索',
+      retrieval: '检索知识库',
+      skip_retrieval: '无需检索',
+      rerank: '重排条款',
+      reflect: '自省核查',
+      retry: '换个问法重查',
+      generate: '生成回答',
+      memory: '写入记忆',
+    };
+
+    function stageLabel(name) {
+      // reflect_1 / retry_2 这类带序号的取前缀，否则会把每个跳数都变成新阶段
+      const base = String(name || '').replace(/_\d+$/, '');
+      return STAGE_LABELS[base] || String(name || '');
+    }
+
     function riskTypes(risks) {
       const names = [];
       for (const item of risks || []) {
@@ -140,6 +216,27 @@ createApp({
       return String(text || '').replace(/\s+/g, '').replace(/[？?。.！!，,]/g, '');
     }
 
+    // ---------- 顶栏文案 ----------
+    const PAGE_META = {
+      chat: ['问答', '引用来源可逐条核对，手册里没有的会明确拒答'],
+      rules: ['规则诊断', '把条文抽成「条件 → 后果」，再和你的具体数值比对'],
+      proc: ['办事流程', '从原文抽出的办理步骤，可当待办清单勾选'],
+      kb: ['知识库', '已入库文档与分块，改这里会同步重建检索索引'],
+      memory: ['长期记忆', '跨会话记住的内容，回答时会注入给模型'],
+      trace: ['链路追踪', '每次问答的全过程留痕，用来定位是哪一环出了问题'],
+    };
+
+    const pageTitle = computed(() => (PAGE_META[page.value] || ['', ''])[0]);
+    const pageDesc = computed(() => (PAGE_META[page.value] || ['', ''])[1]);
+
+    const userInitial = computed(() => String(userId.value || '?').slice(0, 1));
+
+    // 切页时顺手把该页要用的数据拉上。
+    // 单独抽成函数是因为侧栏导航和「新建会话」都要用同一套逻辑。
+    function goPage(target) {
+      page.value = target;
+    }
+
     function scrollToBottom() {
       nextTick(() => {
         const el = scrollRef.value;
@@ -157,8 +254,10 @@ createApp({
     }
 
     // ---------- 阶段流水 ----------
-    // 后端只推「进入某阶段」事件，耗时由前端按相邻事件的时间差算。
-    // 这样后端不用为了计时把每个阶段都 await 一遍，前端也能实时显示进度。
+    // 后端只推「进入某阶段」事件，耗时先按相邻事件的时间差估算——
+    // 这样不用为了计时把每个阶段都 await 一遍，进度也能实时显示。
+    // 注意这个估算值是不准的（SSE 事件会成批到达），所以 done 事件里
+    // 后端会带回真实耗时，到时候整体覆盖一次。见 done 分支。
     function pushStage(assistant, key, label) {
       const now = performance.now();
       for (let i = assistant.pipeline.length - 1; i >= 0; i -= 1) {
@@ -169,7 +268,11 @@ createApp({
           break;
         }
       }
-      assistant.pipeline.push({ key, label, state: 'active', ms: null, startedAt: now });
+      // chip 用短名（「理解问题」），status 行用完整文案（「正在理解问题…」）。
+      // 单独存一个字段而不是共用，是因为 chip 要短才好扫读，状态行要完整才像人话。
+      assistant.pipeline.push({
+        key, label, chip: stageLabel(key), state: 'active', ms: null, startedAt: now,
+      });
       assistant.status = label;
     }
 
@@ -266,6 +369,107 @@ createApp({
       }
     }
 
+    // ---------- 规则诊断 ----------
+    async function loadRuleStats() {
+      try {
+        const result = await api('/api/rulebook/stats');
+        if (result.enabled === false) {
+          ElMessage.warning('规则库已在配置中关闭（RULEBOOK_ENABLED=false）');
+          return;
+        }
+        ruleStats.value = result;
+      } catch (error) {
+        console.error('加载规则库统计失败', error);
+      }
+    }
+
+    async function runDiagnose() {
+      const situation = diagInput.value.trim();
+      if (!situation || diagLoading.value) return;
+      diagLoading.value = true;
+      diagResult.value = null;
+      try {
+        diagResult.value = await api('/api/rulebook/diagnose', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ situation }),
+        });
+      } catch (error) {
+        ElMessage.error('诊断失败：' + error.message);
+      } finally {
+        diagLoading.value = false;
+      }
+    }
+
+    async function loadRules() {
+      try {
+        const params = new URLSearchParams({ limit: '30' });
+        if (ruleQuery.value.trim()) params.set('q', ruleQuery.value.trim());
+        if (ruleKind.value) params.set('kind', ruleKind.value);
+        const result = await api('/api/rulebook/rules?' + params.toString());
+        ruleList.value = result.items || [];
+        ruleListTotal.value = result.total || 0;
+        if (!Object.keys(ruleKinds.value).length) ruleKinds.value = result.kinds || {};
+      } catch (error) {
+        ElMessage.error('加载规则失败：' + error.message);
+      }
+    }
+
+    async function switchBrowseTab() {
+      ruleTab.value = 'browse';
+      // 只在首次进入时加载，避免每次切回来都重打一次接口
+      if (!ruleList.value.length) await loadRules();
+    }
+
+    async function filterRules(kind) {
+      ruleKind.value = kind;
+      // 换种类时清掉关键词——两者是「与」的关系，不清会搜出空结果让人困惑
+      ruleQuery.value = '';
+      await loadRules();
+    }
+
+    // ---------- 办事流程 ----------
+    async function loadProcedures() {
+      if (procLoading.value) return;
+      procLoading.value = true;
+      try {
+        const params = new URLSearchParams({ limit: '50' });
+        if (procQuery.value.trim()) params.set('q', procQuery.value.trim());
+        const result = await api('/api/rulebook/procedures?' + params.toString());
+        procedures.value = result.items || [];
+        procTotal.value = result.total || 0;
+        // 当前选中的流程如果被新结果挤出去了，自动落到第一条，避免右侧停在旧内容上
+        if (!procedures.value.some((p) => currentProc.value && p.id === currentProc.value.id)) {
+          currentProc.value = procedures.value[0] || null;
+        }
+      } catch (error) {
+        ElMessage.error('加载流程失败：' + error.message);
+      } finally {
+        procLoading.value = false;
+      }
+    }
+
+    function openProcedure(item) {
+      currentProc.value = item;
+    }
+
+    function isStepChecked(procId, index) {
+      const set = stepChecks.value[procId];
+      return Boolean(set && set.includes(index));
+    }
+
+    function toggleStep(procId, index) {
+      const set = stepChecks.value[procId] || [];
+      const next = set.includes(index) ? set.filter((i) => i !== index) : set.concat(index);
+      // 整体替换而不是原地改数组，否则 Vue 追踪不到这次变更
+      stepChecks.value = { ...stepChecks.value, [procId]: next };
+    }
+
+    function checkedCount(item) {
+      const set = stepChecks.value[item.id];
+      return set ? set.length : 0;
+    }
+
     // ---------- 会话操作 ----------
     function newConversation() {
       if (isStreaming.value) {
@@ -296,6 +500,7 @@ createApp({
           reasonOpen: item.role === 'assistant' && Boolean(item.reasoning),
           sources: (item.sources || []).map((s) => ({ ...s, open: false })),
           pipeline: [],
+          plan: null,
           risks: [],
           memoryItems: [],
           status: '',
@@ -305,6 +510,41 @@ createApp({
           feedback: item.feedback || '',
           refused: item.role === 'assistant' && item.content.indexOf('手册中未找到相关内容') === 0,
         }));
+
+        // 把「上一条用户提问」挂到助手消息上。有了它，理解卡片才能判断
+        // 「问题到底有没有被改写」，否则拿不出原始问题做对比。
+        messages.value.forEach((m, i) => {
+          if (m.role === 'assistant' && i > 0 && messages.value[i - 1].role === 'user') {
+            m.questionText = messages.value[i - 1].content;
+          }
+        });
+
+        // 回填链路信息。不做这一步，历史会话里「问题理解」和「阶段耗时」都是空的——
+        // 而这些恰恰是最该被看到的部分：用户点开旧对话，也应该能看见
+        // 当时问题被改写成了什么、每一步花了多久，而不是一条光秃秃的回答。
+        const pending = messages.value.filter((m) => m.traceId).slice(-8);
+        await Promise.all(pending.map(async (m) => {
+          try {
+            const trace = await api(`/api/trace/${m.traceId}`);
+            if (trace.plan) {
+              m.plan = {
+                intent: trace.plan.intent,
+                complexity: trace.plan.complexity,
+                rewritten: trace.rewritten || '',
+                subQueries: trace.plan.sub_queries || [],
+                needsRetrieval: trace.plan.needs_retrieval,
+                reason: trace.plan.reason || '',
+              };
+            }
+            m.pipeline = (trace.stages || [])
+              .filter((s) => s.ms > 0)
+              .map((s) => ({ key: s.stage, label: stageLabel(s.stage), state: 'done', ms: s.ms }));
+          } catch (error) {
+            // 链路可能已被清理，或这条消息本来就没记链路——静默跳过，
+            // 不能因为回填失败就让整个会话打不开
+          }
+        }));
+
         scrollToBottom();
       } catch (error) {
         ElMessage.error('加载历史消息失败：' + error.message);
@@ -412,6 +652,22 @@ createApp({
         case 'done':
           if (event.message_id) assistant.messageId = event.message_id;
           if (event.trace_id) assistant.traceId = event.trace_id;
+          if (isNumber(event.max_similarity)) assistant.maxSimilarity = event.max_similarity;
+          // 用后端的真实阶段耗时覆盖前端的估算值。
+          // 上面的 pushStage 是按事件到达时间差估的，SSE 成批到达时会算出
+          // 「理解问题 0ms、筛选条款 9 秒」这种明显不对的数字。
+          // 后端 recorder 里本来就是真实计时，用它重排一遍最省事也最准。
+          if (Array.isArray(event.stages) && event.stages.length) {
+            assistant.pipeline = event.stages
+              .filter((s) => s.ms > 0)
+              .map((s) => ({
+                key: s.stage,
+                label: stageLabel(s.stage),
+                chip: stageLabel(s.stage),
+                state: 'done',
+                ms: s.ms,
+              }));
+          }
           break;
 
         case 'error':
@@ -453,6 +709,7 @@ createApp({
         messageId: null,
         traceId: null,
         feedback: '',
+        maxSimilarity: null,
       });
 
       messages.value.push({
@@ -755,8 +1012,18 @@ createApp({
       }));
     });
 
+    // 浏览器前进 / 后退、或者有人手改地址栏 hash 时，页面要跟着走。
+    // 不监听的话，<a href="#rules"> 这类链接点了没反应——因为只改 hash
+    // 不会触发页面重载，Vue 这边就完全不知道地址变了。
+    window.addEventListener('hashchange', () => {
+      const target = (location.hash || '').replace('#', '');
+      if (PAGE_META[target] && target !== page.value) page.value = target;
+    });
+
     // ---------- 页面切换时按需加载 ----------
+    // 顺便把页面写进 URL hash：刷新后还停在原页，也能把某一页直接发给别人
     watch(page, (value) => {
+      if (location.hash !== '#' + value) location.hash = value;
       if (value === 'kb') loadDocuments();
       if (value === 'memory') {
         loadMemories();
@@ -764,6 +1031,9 @@ createApp({
       }
       if (value === 'chat') loadConversations();
       if (value === 'trace') loadTraces();
+      if (value === 'rules') loadRuleStats();
+      // 流程列表一次就够，之后靠搜索框刷新，不必每次切页都重拉
+      if (value === 'proc' && !procedures.value.length) loadProcedures();
     });
 
     watch(userId, async (value, oldValue) => {
@@ -774,7 +1044,14 @@ createApp({
     });
 
     onMounted(async () => {
-      await Promise.all([refreshStats(), loadConversations()]);
+      // 带 hash 进来就直接落到那一页（分享链接、刷新保持页面都靠它）。
+      // 赋值 page 会触发上面的 watch，该页的数据随之加载，不用在这里重复拉。
+      const initial = (location.hash || '').replace('#', '');
+      if (PAGE_META[initial]) page.value = initial;
+
+      // 规则库统计也一起拉：首屏空状态要显示「抽了多少条规则」，
+      // 这是第一眼就能传达「这项目不止是问答」的地方。
+      await Promise.all([refreshStats(), loadConversations(), loadRuleStats()]);
     });
 
     return {
@@ -782,6 +1059,10 @@ createApp({
       documents, memories, memoryUsers, uploading, scrollRef,
       chunkDrawer, traceDrawer, traceOverview, traces, traceOnlyRefused, badcases,
       stats, suggestions,
+      theme, toggleTheme, pageTitle, pageDesc, userInitial, goPage,
+      ruleTab, ruleStats, diagInput, diagLoading, diagResult, diagExamples,
+      ruleKinds, ruleKind, ruleQuery, ruleList, ruleListTotal,
+      procedures, procTotal, procQuery, procLoading, currentProc,
       formatTime, renderMarkdown, pct, isNumber, pretty, channelOf, channelLabel, riskTypes,
       planIntentLabel, planWasRewritten,
       satisfactionText, stageBars, traceStages,
@@ -790,6 +1071,8 @@ createApp({
       copyAnswer, rate,
       handleUpload, removeDocument, openChunks, locateChunk, removeMemory,
       openTrace, loadTraces, loadBadcases, exportBadcases,
+      loadRuleStats, runDiagnose, loadRules, filterRules, switchBrowseTab,
+      loadProcedures, openProcedure, toggleStep, isStepChecked, checkedCount,
     };
   },
 }).use(ElementPlus, { locale: ElementPlusLocaleZhCn }).mount('#app');

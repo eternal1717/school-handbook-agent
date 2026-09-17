@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from app.config import BACKEND_DIR, settings
 from app.db.session import SessionLocal, init_db
 from app.models import Conversation, KnowledgeDocument, LongTermMemory
-from app.routers import chat, history, knowledge, observability
+from app.routers import chat, history, knowledge, observability, rulebook
 from app.services import hybrid, vector_store
 from app.services.utils import run_sync
 
@@ -78,6 +78,7 @@ app.include_router(chat.router)
 app.include_router(knowledge.router)
 app.include_router(history.router)
 app.include_router(observability.router)
+app.include_router(rulebook.router)
 
 
 @app.get("/health", tags=["system"])

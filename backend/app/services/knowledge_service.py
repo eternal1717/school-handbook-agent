@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import KnowledgeDocument
-from app.services import doc_parser, embedding as embedding_service, hybrid, vector_store
+from app.services import doc_parser, embedding as embedding_service, hybrid, rulebook, vector_store
 from app.services.utils import content_hash, run_sync
 
 # 入库串行化：去重是「先查全库指纹、再写入」的两步操作，两个请求并发上传同一份文档时
@@ -141,7 +141,6 @@ async def _ingest_file_unlocked(db: AsyncSession, path: Path, original_name: str
     # 下一次检索时 get_bm25() 会发现条数对不上，自动重建。
     # 好处是连续上传多份文件时只重建一次，而不是每份都重建。
     hybrid.invalidate_bm25()
-
     document = KnowledgeDocument(
         id=doc_id,
         filename=filename,
@@ -191,5 +190,9 @@ async def delete_document(db: AsyncSession, doc_id: str) -> bool:
     await run_sync(vector_store.delete_document, doc_id)
     await db.delete(document)
     await db.commit()
+    # 和上传一样置空派生缓存。虽然条数校验也能自愈，但显式失效更直白，
+    # 也省掉下一次检索时那次「发现对不上」的探测。
+    hybrid.invalidate_bm25()
+    rulebook.invalidate()
     return True
 
