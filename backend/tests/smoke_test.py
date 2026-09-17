@@ -59,6 +59,7 @@ def read_sse(client: TestClient, question: str, conversation_id: str | None = No
     meta = [e for e in events if e["type"] == "meta"]
     done = [e for e in events if e["type"] == "done"]
     errors = [e["message"] for e in events if e["type"] == "error"]
+    plans = [e for e in events if e["type"] == "plan"]
     return {
         "answer": answer,
         "sources": sources,
@@ -69,6 +70,9 @@ def read_sse(client: TestClient, question: str, conversation_id: str | None = No
         # 检索质量指标随 done 事件回传（正常回答和拒答都有）。
         # 早先是挂在 meta 上的，但 meta 只带会话标识，放这里更合语义。
         "max_similarity": (done[-1].get("max_similarity") if done else None),
+        # 分流结果与拒答事件都是结构化信号，优先拿它们做断言——见 [5] 的说明。
+        "intent": (plans[-1].get("intent") if plans else None),
+        "refused": any(e["type"] == "refusal" for e in events),
     }
 
 
@@ -138,13 +142,19 @@ def main() -> None:
         outside = read_sse(client, "红烧肉怎么做才好吃？", user_id="test_user")
         # 拒答有两条路径：检索不到 → 硬拒答文案；被判成越界提问 → 分流说明。
         # 两条都是「明确说自己答不了」，都该算通过。
-        # 只认死一句话会在行为优化后误报失败（实测踩过：越界提问现在会被
-        # 直接判成 out_of_scope 并给出更具体的说明，反而比原来那句通用文案更好）。
+        #
+        # 断言优先看**结构化信号**，不看文案：文案是模型生成的，措辞每次都可能变。
+        # 早先只 match 死句子，模型换了个说法就误报失败——而真实行为完全正确，
+        # 这种「测试自己制造的红灯」最消耗信任。现在改为：
+        #   分流 intent 是 out_of_scope / 触发了 refusal 事件 / 语料里确实没检索到。
+        # 文案只剩最后一道兜底。
         outside_text = outside["answer"]
         check(
-            "触发拒答（硬拒答或越界分流）",
-            ("手册中未找到相关内容" in outside_text) or ("不在我的职责范围" in outside_text),
-            outside_text[:60].replace("\n", " "),
+            "触发拒答（越界分流 / 拒答事件 / 检索不到）",
+            outside["intent"] == "out_of_scope"
+            or outside["refused"]
+            or ("手册中未找到相关内容" in outside_text),
+            f"intent={outside['intent']} refused={outside['refused']} text={outside_text[:50]}".replace("\n", " "),
         )
         check("拒答时不给来源", len(outside["sources"]) == 0)
 

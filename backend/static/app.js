@@ -681,9 +681,17 @@ createApp({
     }
 
     // ---------- 提问 ----------
+    // 和后端 schemas.QUESTION_MAX_CHARS 保持一致。放在前端是为了就近给出提示，
+    // 而不是等请求打到后端再弹一句「HTTP 422」——那种提示用户看不懂。
+    const QUESTION_MAX_CHARS = 2000;
+
     async function sendQuestion() {
       const question = draft.value.trim();
       if (!question || isStreaming.value) return;
+      if (question.length > QUESTION_MAX_CHARS) {
+        ElMessage.warning(`问题太长了（${question.length} 字），请精简到 ${QUESTION_MAX_CHARS} 字以内`);
+        return;
+      }
 
       isStreaming.value = true;
       const assistant = reactive({
@@ -733,7 +741,19 @@ createApp({
           signal: controller.signal,
         });
 
-        if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok || !response.body) {
+          // 把后端的校验信息读出来转述给用户。Pydantic 的 422 详情是个数组，
+          // 直接 toString 会显示成 [object Object]，所以取第一个 msg。
+          let detail = '';
+          try {
+            const payload = await response.json();
+            if (Array.isArray(payload.detail)) detail = payload.detail[0]?.msg || '';
+            else if (typeof payload.detail === 'string') detail = payload.detail;
+          } catch (parseError) {
+            console.warn('无法解析错误响应', parseError);
+          }
+          throw new Error(detail || `HTTP ${response.status}`);
+        }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');

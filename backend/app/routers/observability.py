@@ -27,6 +27,8 @@ async def submit_feedback(payload: FeedbackRequest, db: AsyncSession = Depends(g
         question=payload.question,
         comment=payload.comment,
     )
+    if item is None:
+        raise HTTPException(status_code=404, detail="消息不存在，无法提交反馈")
     return {"ok": True, "message_id": item.message_id, "rating": item.rating}
 
 

@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import urllib.error
 import urllib.request
 
@@ -205,6 +204,25 @@ def main() -> int:
               json.dumps(detail.get("usage") or {}, ensure_ascii=False)[:160])
         check("详情含阶段耗时", bool(detail.get("stages")),
               f"{len(detail.get('stages') or [])} 段")
+
+    # --- 清理 ---
+    # 这个脚本是打真实服务的，会真的建会话、写反馈、落链路。
+    # 收尾时全部删掉，否则跑几次就把演示库弄脏（会话列表里冒出一堆验证问答）。
+    # 删除接口现在会连带清掉 message / feedback / trace，所以删会话就够了。
+    print("\n" + "=" * 68)
+    print("清理 · 收回本次验证产生的数据")
+    print("=" * 68)
+    if conv_id:
+        cleaned = _request("DELETE", f"/api/conversations/{conv_id}")
+        check("验证会话已清理", cleaned.get("deleted") is True, json.dumps(cleaned, ensure_ascii=False))
+        # 确认反馈也跟着走了，不留悬空记录
+        badcases_after = _request("GET", "/api/feedback/badcases?limit=50")
+        dangling = [
+            item for item in badcases_after.get("items", [])
+            if item.get("message_id") in {msg_id, second.get("message_id")}
+        ]
+        check("反馈随会话一并清理（无悬空 badcase）", not dangling,
+              f"残留={[d.get('message_id') for d in dangling]}")
 
     # --- 结果 ---
     print("\n" + "=" * 68)

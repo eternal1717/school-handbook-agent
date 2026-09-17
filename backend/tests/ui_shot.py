@@ -52,6 +52,17 @@ from pathlib import Path
 DEBUG_PORT = 9222
 CDP_HOST = f"http://127.0.0.1:{DEBUG_PORT}"
 
+# 所有 CDP 请求都走这个 opener —— 它**显式禁用代理**。
+# 为什么必须禁：开发机上常配了全局 http_proxy（抓包、公司网关、某些 IDE 都会设），
+# 而 urllib 默认会把 http://127.0.0.1:9222 也交给代理，代理不认这个地址就回
+# 502 Bad Gateway。报错显示成「连不上 CDP」，会把人往「浏览器没启动」的方向带，
+# 实际浏览器好好的 —— 这种误导性报错踩过一次，记在这里。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def cdp_get(url: str, timeout: float) -> bytes:
+    return _OPENER.open(url, timeout=timeout).read()
+
 # 系统自带浏览器的常见位置。刻意不下载 Chromium：
 # 一个 500MB 的浏览器只为截图不值当，而且用户对磁盘占用很敏感。
 BROWSER_CANDIDATES = [
@@ -92,7 +103,7 @@ def serve(width: int, height: int) -> None:
     # 等调试端口就绪。最多等 20 秒——冷启动加上杀毒软件扫描，慢的时候要几秒。
     for _ in range(40):
         try:
-            urllib.request.urlopen(f"{CDP_HOST}/json/version", timeout=1).read()
+            cdp_get(f"{CDP_HOST}/json/version", timeout=1)
             print(f"CDP 就绪（pid={proc.pid}）。现在可以另开终端跑截图命令了。")
             return
         except (urllib.error.URLError, OSError):
@@ -123,7 +134,7 @@ class CDP:
 async def capture(url: str, out: Path, js: str, wait: float, width: int, height: int) -> None:
     import websockets
 
-    targets = json.loads(urllib.request.urlopen(f"{CDP_HOST}/json", timeout=5).read())
+    targets = json.loads(cdp_get(f"{CDP_HOST}/json", timeout=5))
     pages = [t for t in targets if t.get("type") == "page"]
     if not pages:
         raise SystemExit("没有可用的 page target")

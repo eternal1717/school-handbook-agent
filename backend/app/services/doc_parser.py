@@ -70,15 +70,20 @@ def parse_pdf(path: Path) -> list[dict]:
 
 def parse_text(path: Path) -> list[dict]:
     """纯文本/Markdown：按行读，尽量识别章节标题。"""
-    content = ""
+    content: str | None = None
     for encoding in ("utf-8", "gbk"):
         try:
             content = path.read_text(encoding=encoding)
             break
         except UnicodeDecodeError:
             continue
-    if not content:
+    # 区分「解码失败」和「本来就是空文件」：早先统一用 `if not content` 判断，
+    # 一个 0 字节的文件会报「无法解码（试过 utf-8 / gbk）」，把人往编码问题上带，
+    # 实际它只是空的。
+    if content is None:
         raise ValueError(f"无法解码文件（试过 utf-8 / gbk）：{path.name}")
+    if not content.strip():
+        raise ValueError(f"文件内容为空：{path.name}")
 
     blocks: list[dict] = []
     chapter = ""

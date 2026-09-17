@@ -15,7 +15,7 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
-from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.db.session import SessionLocal, init_db  # noqa: E402

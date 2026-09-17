@@ -60,9 +60,7 @@ from app.services import (
     memory_service,
     tokenizer,
     trace_service,
-    vector_store,
 )
-from app.services.utils import run_sync
 
 # 去重指纹取正文前多少字。取太短会把「第七十七条」和「第七十八条」
 # 这种同族条款误判成同一条；取太长又抓不住分块重叠造成的重复。
@@ -455,9 +453,14 @@ async def answer_stream(
         top_hits = reranked["hits"][:settings.rerank_top_n]
 
         # ===== [5] 注入扫描 =====
+        # reported_risks 记录已经推给前端的风险块。自省重查后会再扫一遍，
+        # 而新一轮的 top_hits 与上一轮常有重叠——不去重的话前端会看到同一块
+        # 内容的风险提示出现两次（前端是累加展示的）。
+        reported_risks: set[str] = set()
         if settings.guard_enabled:
             top_hits, risks = guard.mark_hits(top_hits)
             if risks:
+                reported_risks.update(r["chunk_id"] for r in risks)
                 recorder.add_guard_risks(risks)
                 yield _ev("guard", risks=risks)
 
@@ -507,8 +510,12 @@ async def answer_stream(
             top_hits = reranked["hits"][:settings.rerank_top_n]
             if settings.guard_enabled:
                 top_hits, risks = guard.mark_hits(top_hits)
-                if risks:
-                    recorder.add_guard_risks(risks)
+                # 只推「这一轮新发现」的风险，已在第一轮报过的不重复推。
+                fresh = [r for r in risks if r["chunk_id"] not in reported_risks]
+                if fresh:
+                    reported_risks.update(r["chunk_id"] for r in fresh)
+                    recorder.add_guard_risks(fresh)
+                    yield _ev("guard", risks=fresh)
             max_similarity = _max_similarity(top_hits)
 
         recorder.hops = hops

@@ -14,7 +14,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Conversation, LongTermMemory, Message
+from app.models import Conversation, Feedback, LongTermMemory, Message, Trace
 from app.services import llm
 
 NAMESPACE = "school_handbook"
@@ -68,7 +68,16 @@ async def list_conversations(db: AsyncSession, user_id: str) -> list[dict]:
 
 
 async def delete_conversation(db: AsyncSession, conversation_id: str) -> None:
-    """删除会话及其所有消息。"""
+    """删除会话，连同它的消息、反馈和链路一起清掉。
+
+    只删消息是不够的：Feedback.message_id、Trace.message_id 指向的就是消息，
+    消息没了它们就成了悬空数据——满意度统计把它们算进去，
+    badcase 列表里点开却找不到那条回答。删会话时一并清掉，统计口径才自洽。
+
+    顺序上先删子表再删父表（conversation），避免中途失败留下更乱的半截状态。
+    """
+    await db.execute(delete(Feedback).where(Feedback.conversation_id == conversation_id))
+    await db.execute(delete(Trace).where(Trace.conversation_id == conversation_id))
     await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
     await db.execute(delete(Conversation).where(Conversation.id == conversation_id))
     await db.commit()

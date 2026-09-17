@@ -97,7 +97,6 @@ def rrf_fuse(rankings: list[list[str]], k: int | None = None) -> dict[str, float
 
 async def retrieve_multi(
     queries: list[str],
-    top_n: int | None = None,
     fused_limit: int | None = None,
 ) -> dict:
     """多查询混合检索。
@@ -106,9 +105,10 @@ async def retrieve_multi(
     这时每条都跑一遍双路检索，再把所有排名一起丢进 RRF——这是
     「查询拆分 + 融合召回」的标准做法。
 
-    返回 {hits, stats}，hits 已按融合分降序，含两路各自的原始分数与排名。
+    返回 {hits, stats}。**hits 是融合后的候选池（默认 20 条），不是最终结果**——
+    调用方随后要拿它去重排，再按 rerank_top_n 截取。所以这里不做最终截断，
+    截断由 _prepare_candidates 统一负责（那里还要兼顾去重）。
     """
-    top_n = top_n or settings.rerank_top_n
     fused_limit = fused_limit or settings.fused_candidates
     queries = [q.strip() for q in queries if q and q.strip()]
     if not queries:

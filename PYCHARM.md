@@ -68,7 +68,7 @@ Select existing → 浏览到 `D:\python\python.exe`**。
 |---|---|
 | **启动服务 (run.py)** | 启动后端 + 前端，最常用 |
 | **导入手册 (ingest.py)** | 把文档灌进向量库（需在 Parameters 里填文件路径） |
-| **自测 (smoke_test.py)** | 跑 34 项端到端回归测试 |
+| **自测 (smoke_test.py)** | 跑 36 项端到端回归测试 |
 
 选 **"启动服务 (run.py)"** → 点绿色三角 ▶（或按 `Shift+F10`）。
 
@@ -113,7 +113,7 @@ http://127.0.0.1:8000/
 
 ```
 D:\python\python.exe tests\check_undefined.py          静态检查：有没有「调用未定义函数」
-D:\python\python.exe tests\verify_observability.py     反馈闭环 + 链路追踪 + 引用溯源（31 项断言）
+D:\python\python.exe tests\verify_observability.py     反馈闭环 + 链路追踪 + 引用溯源（33 项断言）
 D:\python\python.exe tests\eval_rag.py --retrieval-only 检索消融：混合检索 vs 纯向量（不调大模型，秒级）
 D:\python\python.exe tests\eval_rag.py                  端到端评测（25 条用例，会真实调模型，较慢）
 D:\python\python.exe tests\smoke_test.py                端到端回归（36 项，需服务已在 8000 跑着）

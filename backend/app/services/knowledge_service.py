@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.config import UPLOAD_DIR, settings
 from app.models import KnowledgeDocument
 from app.services import doc_parser, embedding as embedding_service, hybrid, rulebook, vector_store
 from app.services.utils import content_hash, run_sync
@@ -25,6 +25,30 @@ _ingest_lock = asyncio.Lock()
 async def list_documents(db: AsyncSession) -> list[KnowledgeDocument]:
     result = await db.execute(select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc()))
     return list(result.scalars().all())
+
+
+def _remove_upload_file(filename: str, size_bytes: int) -> bool:
+    """删掉 data/uploads/ 下对应的物理文件，返回是否真删了。
+
+    为什么要加「大小一致」这道判断：`ingest-local` 导入的是**任意本机路径**的文件，
+    它并不往 uploads/ 里放副本。如果只按文件名去删，某个本机同名文件恰好与
+    uploads/ 里的残留同名时，就可能误删无关文件。要求大小也对得上，
+    基本排除误伤（真命中也是同名同大小的副本，删掉无妨）。
+
+    删失败（被占用、无权限）静默跳过：清理残留不该影响删除文档这个主流程。
+    """
+    if not filename:
+        return False
+    target = UPLOAD_DIR / Path(filename).name
+    try:
+        if not target.is_file():
+            return False
+        if size_bytes > 0 and target.stat().st_size != size_bytes:
+            return False
+        target.unlink()
+        return True
+    except OSError:
+        return False
 
 
 async def _remove_same_filename(db: AsyncSession, filename: str) -> int:
@@ -190,6 +214,10 @@ async def delete_document(db: AsyncSession, doc_id: str) -> bool:
     if document is None:
         return False
 
+    # 先把要用到的字段读出来：下面 db.delete + commit 之后 ORM 对象会过期，
+    # 再去取属性会触发一次「按主键回查」，而那一行已经没了。
+    stored_name, stored_size = document.filename, document.size_bytes
+
     await run_sync(vector_store.delete_document, doc_id)
     await db.delete(document)
     await db.commit()
@@ -197,5 +225,7 @@ async def delete_document(db: AsyncSession, doc_id: str) -> bool:
     # 也省掉下一次检索时那次「发现对不上」的探测。
     hybrid.invalidate_bm25()
     rulebook.invalidate()
+    # 顺带把上传时落盘的物理文件清掉，否则 uploads/ 只会越积越多。
+    _remove_upload_file(stored_name, stored_size)
     return True
 

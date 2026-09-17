@@ -75,6 +75,29 @@ def _format_history(history: list[dict], limit: int = 4) -> str:
     return "\n".join(lines)
 
 
+def _as_bool(value, default: bool = True) -> bool:
+    """把模型返回的布尔值稳妥地转成 bool。
+
+    为什么要单独写：模型经常把布尔值写成**字符串**——`"false"`、`"否"`、`"no"`。
+    而 Python 里 `bool("false")` 是 **True**（非空字符串恒为真），
+    于是 `needs_retrieval` 会被整个反过来：模型说「不需要检索」，
+    系统却去检索了。这类错误的可怕之处在于它不报错、只是行为悄悄变差。
+
+    认得 true/false、1/0、yes/no、是/否 等常见写法，认不出就用默认值。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y", "是", "真", "对", "需要"}:
+            return True
+        if text in {"false", "0", "no", "n", "否", "假", "错", "不需要", ""}:
+            return False
+    return default
+
+
 def _default_plan(question: str) -> dict:
     """规划失败时的兜底：按原句检索、走单跳。绝不因为规划失败就不答。"""
     return {
@@ -88,10 +111,62 @@ def _default_plan(question: str) -> dict:
     }
 
 
+# 纯寒暄的快速通道用到的词表与标点。**必须整句消耗得掉才算命中**：
+# 夹带任何实质内容（「谢谢你，那请假要办什么手续？」）都会剩下消不掉的字符，
+# 于是判为 False —— 所以不存在「把真问题误判成闲聊」的风险。
+_PLEASANTRY_PUNCT = " \t\r\n，。！？、；：,.!?;:~～…（）()「」『』\"'“”‘’"
+_PLEASANTRY_WORDS = (
+    "早上好", "中午好", "下午好", "晚上好", "辛苦了", "谢谢你", "谢谢您",
+    "你好", "您好", "谢谢", "多谢", "感谢", "再见", "拜拜", "哈喽",
+    "在吗", "好的", "收到", "哈哈", "呵呵", "hello", "hi", "hey",
+    # 单字/短词语气词：给「谢谢你啦」「我明白了」这类用法兜底
+    "明白", "你", "您", "好", "我", "啦", "了", "呀", "啊", "哦", "噢", "嗯", "吧", "是", "的",
+)
+
+
+def _is_pure_pleasantry(text: str) -> bool:
+    """整句是否只由礼貌用语构成。
+
+    为什么要在模型之前拦一道：这两句其实是同一个判断，
+    但「你好」「谢谢你」这类输入交给模型分类时**会随采样波动**——
+    实测同一句「谢谢你」多数情况判 chitchat，偶尔判成 regulation。
+    判错也不报错，只是白跑一遍检索、在一条「谢谢你」下面挂 5 条来源。
+    本地判定把这类输入钉死，既省一次模型调用，也让行为可预期。
+    """
+    rest = "".join(ch for ch in text if ch not in _PLEASANTRY_PUNCT)
+    if not rest or len(rest) > 12:
+        return False
+    changed = True
+    while rest and changed:
+        changed = False
+        for word in _PLEASANTRY_WORDS:
+            if rest.startswith(word):
+                rest = rest[len(word):]
+                changed = True
+                break
+    return not rest
+
+
+def _pleasantry_plan(question: str) -> dict:
+    """寒暄的规划结果：不检索，走闲聊通道。"""
+    return {
+        "intent": "chitchat",
+        "needs_retrieval": False,
+        "rewritten": question,
+        "sub_queries": [],
+        "complexity": "simple",
+        "reason": "整句只由礼貌用语构成（本地判定，无需检索）",
+        "_fallback": False,
+    }
+
+
 async def plan_query(question: str, history: list[dict]) -> dict:
     """理解提问：意图、是否检索、改写、子查询、复杂度。"""
     if settings.use_mock_llm or not settings.query_rewrite_enabled:
         return _default_plan(question)
+    # 放在开关判断之后：关掉查询改写是做消融用的，那条路径要保持原样。
+    if _is_pure_pleasantry(question):
+        return _pleasantry_plan(question)
 
     prompt = (PLAN_PROMPT
               .replace("__HISTORY__", _format_history(history))
@@ -106,7 +181,7 @@ async def plan_query(question: str, history: list[dict]) -> dict:
 
     intent = str(data.get("intent") or "regulation").strip().lower()
     plan["intent"] = intent if intent in {"regulation", "procedure", "chitchat", "out_of_scope"} else "regulation"
-    plan["needs_retrieval"] = bool(data.get("needs_retrieval", True))
+    plan["needs_retrieval"] = _as_bool(data.get("needs_retrieval"), True)
 
     rewritten = str(data.get("rewritten") or "").strip()
     plan["rewritten"] = rewritten or question
@@ -280,7 +355,10 @@ async def judge_sufficiency(question: str, hits: list[dict]) -> dict:
                 "skipped": True, "reason": "自省调用失败，默认放行"}
 
     return {
-        "sufficient": bool(data.get("sufficient", True)),
+        # 注意这里必须走 _as_bool：模型常把布尔写成字符串 "false"，
+        # 而 bool("false") 是 True —— 会被误判成「资料够用」，
+        # 于是自省重查整段被静默跳过，多跳问题就再也补不到资料了。
+        "sufficient": _as_bool(data.get("sufficient"), True),
         "missing": str(data.get("missing") or "")[:200],
         "rewritten": str(data.get("rewritten") or "").strip()[:200],
         "skipped": False,

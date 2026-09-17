@@ -53,7 +53,6 @@
 import json
 import re
 import time
-from pathlib import Path
 
 from app.config import settings
 from app.services import vector_store
@@ -704,12 +703,38 @@ _USER_NUM_RE = re.compile(
 _UNIT_ALIAS = {"门课": "门", "日": "天", "个工作日": "工作日"}
 
 
+def _canonical_unit(unit: str) -> str:
+    """把单位归一到规范写法，供「规则阈值」和「用户口述」**两侧共用**。
+
+    必须两侧都过一遍，否则数值比对会**静默失效**：
+    规则侧的阈值是从条文里抽的，常写成「个工作日」「日」；
+    用户侧经 _USER_NUM_RE 抽出来后会被归成「工作日」「天」。
+    两边写法对不上时，_verdict 会走到 `if unit not in user_nums: return None`
+    ——不报错、不提示，页面上只是「这条规则怎么没有比对结果」，非常难查。
+
+    实测：规则库里 unit='个工作日' 的有 9 条，而用户侧永远只会产生
+    '工作日'，于是这 9 条规则的数量比对全部失效。
+    """
+    return _UNIT_ALIAS.get(unit, unit)
+
+
+def _unit_text(value: int, unit: str) -> str:
+    """把数值 + 单位拼成自然的说法。
+
+    「工作日」需要量词「个」，否则会显示成「5工作日」；其余单位直接拼接即可
+    （「3门」「2次」「15天」）。比对用的是规范单位，展示用的是人话，两回事。
+    """
+    if unit == "工作日":
+        return f"{value}个工作日"
+    return f"{value}{unit}"
+
+
 def _user_numbers(text: str) -> dict[str, int]:
     """抽出学生情境里的「数值 + 单位」。同单位取最大值——
     「挂了3门，其中2门重修」里 3 门才是关键的那个数。"""
     found: dict[str, int] = {}
     for m in _USER_NUM_RE.finditer(_clean(text)):
-        unit = _UNIT_ALIAS.get(m.group("unit"), m.group("unit"))
+        unit = _canonical_unit(m.group("unit"))
         value = int(m.group("num"))
         if value > found.get(unit, 0):
             found[unit] = value
@@ -728,7 +753,9 @@ def _verdict(rule: dict, user_nums: dict[str, int]) -> dict | None:
     threshold = rule.get("threshold")
     if not threshold:
         return None
-    unit = threshold["unit"]
+    # 两侧都归一化到同一写法，否则「个工作日」这类别名会让比对静默失败。
+    # 用户侧在 _user_numbers 里已归一，这里补上阈值侧——少任何一侧都白做。
+    unit = _canonical_unit(threshold["unit"])
     if unit not in user_nums:
         return None
 
@@ -736,24 +763,27 @@ def _verdict(rule: dict, user_nums: dict[str, int]) -> dict | None:
     limit = threshold["value"]
     modal = threshold.get("modal", "")
     gap = abs(limit - mine)
+    mine_text = _unit_text(mine, unit)
+    limit_text = _unit_text(limit, unit)
+    gap_text = _unit_text(gap, unit)
 
     # 上限型：「不得超过 2 次」——超过就违反
     if modal in ("不得超过", "不超过", "不得高于", "最多"):
         if mine > limit:
-            return {"status": "over", "text": f"你提到 {mine}{unit}，已超过该条文上限 {limit}{unit}"}
+            return {"status": "over", "text": f"你提到 {mine_text}，已超过该条文上限 {limit_text}"}
         if mine == limit:
-            return {"status": "edge", "text": f"你提到 {mine}{unit}，正好等于该条文上限 {limit}{unit}"}
-        return {"status": "under", "text": f"你提到 {mine}{unit}，距该条文上限 {limit}{unit} 还差 {gap}{unit}"}
+            return {"status": "edge", "text": f"你提到 {mine_text}，正好等于该条文上限 {limit_text}"}
+        return {"status": "under", "text": f"你提到 {mine_text}，距该条文上限 {limit_text} 还差 {gap_text}"}
 
     # 下限型：「不得低于 / 至少」——不足就不达标
     if modal in ("不得低于", "不低于", "至少", "最少"):
         if mine < limit:
-            return {"status": "under", "text": f"你提到 {mine}{unit}，低于该条文要求 {limit}{unit}，差 {gap}{unit}"}
-        return {"status": "ok", "text": f"你提到 {mine}{unit}，达到该条文要求 {limit}{unit}"}
+            return {"status": "under", "text": f"你提到 {mine_text}，低于该条文要求 {limit_text}，差 {gap_text}"}
+        return {"status": "ok", "text": f"你提到 {mine_text}，达到该条文要求 {limit_text}"}
 
     # 时限型：「须在 3 个工作日内」——只陈述时限，不判断是否超期（缺少起始时点）
     if modal == "须在":
-        return {"status": "info", "text": f"该条文要求 {limit}{unit} 内完成，你提到的是 {mine}{unit}"}
+        return {"status": "info", "text": f"该条文要求 {limit_text} 内完成，你提到的是 {mine_text}"}
 
     return None
 
@@ -889,7 +919,10 @@ def list_procedures(query: str = "", limit: int = 30) -> dict:
 
     return {
         "total": len(book.get("procedures") or []),
-        "returned": len(items),
+        # returned 必须和 items 的实际条数一致：早先写的是 len(items)（截断前），
+        # 于是 limit=1 时会返回「returned=24 但 items 只有 1 条」，
+        # 前端按 returned 显示「共 24 条」而列表是空的，属于接口自相矛盾。
+        "returned": len(items[:limit]),
         "items": items[:limit],
     }
 

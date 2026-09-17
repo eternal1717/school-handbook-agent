@@ -25,7 +25,6 @@ X% 提到 Y%，因为学生手册里全是条款号和部门名，纯向量对�
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import statistics
 import sys

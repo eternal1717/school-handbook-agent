@@ -12,7 +12,7 @@ import json
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Feedback, Trace
+from app.models import Feedback, Message, Trace
 
 
 # ---------------- 反馈 ----------------
@@ -26,8 +26,16 @@ async def upsert_feedback(
     trace_id: str | None = None,
     question: str = "",
     comment: str = "",
-) -> Feedback:
-    """写反馈。同一条消息同一用户重复评价时覆盖，不产生多条记录。"""
+) -> Feedback | None:
+    """写反馈。同一条消息同一用户重复评价时覆盖，不产生多条记录。
+
+    message_id 指向的消息不存在时返回 None（调用方回 404）。
+    message_id 是「这条回答」的外键语义，不校验就写会留下孤儿反馈：
+    满意度统计被它们拉偏，badcase 导出里还混进无法复核的问题。
+    """
+    if await db.get(Message, message_id) is None:
+        return None
+
     result = await db.execute(
         select(Feedback).where(
             Feedback.message_id == message_id, Feedback.user_id == user_id
@@ -37,11 +45,13 @@ async def upsert_feedback(
 
     if existing is not None:
         existing.rating = rating
-        existing.comment = comment
+        # 截断口径必须和新建分支一致。早先这里直接赋原值，
+        # 于是「先写一条短评、再改成超长文本」能绕过 500 字上限。
+        existing.comment = comment[:500]
         if trace_id:
             existing.trace_id = trace_id
         if question:
-            existing.question = question
+            existing.question = question[:500]
     else:
         existing = Feedback(
             message_id=message_id,

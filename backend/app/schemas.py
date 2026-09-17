@@ -1,13 +1,33 @@
 """接口的请求/响应模型（Pydantic）。"""
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 提问长度上限。定这个数的依据：
+# - 真正的校园规章提问都在 100 字以内，2000 字已经宽松到不可能误伤；
+# - 但不设上限时，把几万字贴进来会**原样送进大模型**——token 费用、延迟
+#   都不可控，而且检索层也捞不出有效信号，纯属浪费。
+QUESTION_MAX_CHARS = 2000
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="用户提问")
+    question: str = Field(..., min_length=1, max_length=QUESTION_MAX_CHARS, description="用户提问")
     user_id: str = Field("default_user", description="用户标识，长期记忆按它隔离")
     conversation_id: str | None = Field(None, description="不传则自动新建会话")
+
+    @field_validator("question")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        """拦掉「全是空白」的提问。
+
+        只靠 min_length=1 不够：`"   "` 长度是 3，能过校验，但它 strip 之后
+        是空字符串——会被判成闲聊，还会在库里留下一个标题为「新会话」的空会话。
+        这里直接去掉首尾空白，顺便让下游不用再 strip。
+        """
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("问题不能为空")
+        return cleaned
 
 
 class SourceItem(BaseModel):
