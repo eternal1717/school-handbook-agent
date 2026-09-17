@@ -1,0 +1,19 @@
+# 统一换行符：仓库内存放 LF，检出时按平台自动转换。
+# 不设这个的话，Windows 上每次提交都会刷一堆
+# "LF will be replaced by CRLF" 警告，diff 里还会混进看不见的换行差异。
+* text=auto eol=lf
+
+# 二进制文件不做换行转换，否则会损坏内容
+*.docx binary
+*.doc binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary

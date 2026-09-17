@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>知津 · 校园规章智能问答</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23409EFF'/%3E%3Crect x='9' y='7' width='14' height='18' rx='2.5' fill='%23fff'/%3E%3Crect x='12' y='12' width='8' height='1.8' rx='0.9' fill='%23409EFF'/%3E%3Crect x='12' y='16' width='8' height='1.8' rx='0.9' fill='%23409EFF'/%3E%3Crect x='12' y='20' width='5' height='1.8' rx='0.9' fill='%23409EFF'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/vendor/element-plus.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <style>
+    [v-cloak] {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app" v-cloak>
+    <!-- 顶部信息栏 -->
+    <div class="topbar">
+      <div class="logo">知津 <span class="logo-sub">· 校园规章智能问答</span></div>
+      <div class="stats">
+        <span>文档 <b>{{ stats.documents }}</b></span>
+        <span>知识块 <b>{{ stats.vectors }}</b></span>
+        <span>会话 <b>{{ stats.conversations }}</b></span>
+        <span>长期记忆 <b>{{ stats.memories }}</b></span>
+      </div>
+      <div class="spacer"></div>
+      <div class="chain-tags">
+        <span class="chain-tag" :class="{ on: stats.pipeline.hybrid }">混合检索</span>
+        <span class="chain-tag" :class="{ on: stats.pipeline.rerank }">重排</span>
+        <span class="chain-tag" :class="{ on: stats.pipeline.agent }">自省×{{ stats.pipeline.max_hops }}</span>
+        <span class="chain-tag" :class="{ on: stats.pipeline.guard }">注入防护</span>
+      </div>
+      <el-tag v-if="stats.llm_mode === 'api'" type="success" effect="plain" size="small">
+        大模型：{{ stats.llm_model }}
+      </el-tag>
+      <el-tag v-else type="warning" effect="plain" size="small">演示模式（未配置 API Key）</el-tag>
+    </div>
+
+    <div class="layout">
+      <!-- 左侧栏 -->
+      <div class="sidebar">
+        <div class="sidebar-head">
+          <el-button type="primary" style="width: 100%" @click="newConversation">新建会话</el-button>
+        </div>
+        <div class="sidebar-menu">
+          <el-radio-group v-model="page" size="small" style="width: 100%">
+            <el-radio-button value="chat">问答</el-radio-button>
+            <el-radio-button value="kb">知识库</el-radio-button>
+            <el-radio-button value="memory">记忆</el-radio-button>
+            <el-radio-button value="trace">链路</el-radio-button>
+          </el-radio-group>
+        </div>
+        <div class="conv-list" v-if="page === 'chat'">
+          <div v-if="conversations.length === 0" style="color: var(--text-sub); font-size: 12.5px; padding: 8px">
+            还没有会话记录，直接提问即可新建
+          </div>
+          <div v-for="c in conversations" :key="c.id" class="conv-item" :class="{ active: c.id === conversationId }"
+            @click="openConversation(c.id)">
+            <div style="min-width: 0">
+              <div class="title">{{ c.title }}</div>
+              <div class="meta">{{ c.message_count }} 条消息</div>
+            </div>
+            <el-button link type="danger" size="small" @click.stop="removeConversation(c.id)">删除</el-button>
+          </div>
+        </div>
+        <div class="conv-list" v-else>
+          <div style="color: var(--text-sub); font-size: 12.5px; padding: 8px; line-height: 1.8">
+            当前用户标识：<span class="mono">{{ userId }}</span><br />
+            长期记忆与评价都按用户隔离存储。
+          </div>
+        </div>
+      </div>
+
+      <!-- 主区域 -->
+      <div class="main">
+        <!-- 问答页 -->
+        <template v-if="page === 'chat'">
+          <div class="chat-scroll" ref="scrollRef">
+            <div class="chat-inner">
+              <div v-if="messages.length === 0" class="empty">
+                <h3>关于校园规章，随便问</h3>
+                <div>回答会附带引用来源；手册里没有的内容，它会明确拒答而不是编造。</div>
+                <div class="suggest-list">
+                  <div class="suggest" v-for="q in suggestions" :key="q" @click="draft = q">{{ q }}</div>
+                </div>
+              </div>
+
+              <div v-for="(m, index) in messages" :key="index" class="msg" :class="[m.role, { refused: m.refused }]">
+                <div class="bubble">
+                  <!-- 思考过程（思维链），默认展开：它是被「看见」的推理，不是黑盒 -->
+                  <div v-if="m.role === 'assistant' && (m.reasoning || (m.pending && !m.content))" class="reasoning-box">
+                    <div class="reasoning-head" @click="m.reasonOpen = !m.reasonOpen">
+                      <span class="pulse" :class="{ live: m.pending }"></span>
+                      <span>{{ m.pending && !m.content ? '正在思考…' : '思考过程' }}</span>
+                      <span class="muted" style="font-size: 11.5px">{{ m.reasoning.length }} 字</span>
+                      <span class="grow"></span>
+                      <span class="toggle">{{ m.reasonOpen ? '收起 ▴' : '展开 ▾' }}</span>
+                    </div>
+                    <div class="reasoning-body" v-show="m.reasonOpen">{{ m.reasoning }}</div>
+                  </div>
+
+                  <div v-if="m.role === 'assistant'" v-html="renderMarkdown(m.content)"></div>
+                  <div v-else style="white-space: pre-wrap">{{ m.content }}</div>
+                  <span v-if="m.pending" class="cursor"></span>
+
+                  <!-- 流程阶段流水：一次问答里真正跑了哪些环节、各花多久 -->
+                  <div v-if="m.role === 'assistant' && m.pipeline.length" class="pipeline">
+                    <span v-for="(s, si) in m.pipeline" :key="si" class="stage-chip" :class="s.state">
+                      {{ s.label }}
+                      <span v-if="s.ms !== null && s.ms !== undefined" class="ms">{{ s.ms }}ms</span>
+                    </span>
+                  </div>
+
+                  <!-- 问题理解结果：这一块是整个系统「不是黑盒」的直接证据。
+                       学生能看到自己的口语问题被改写成了什么措辞、被判成简单还是复杂。 -->
+                  <div v-if="m.role === 'assistant' && m.plan" class="plan-card">
+                    <span class="plan-tag">{{ planIntentLabel(m.plan.intent) }}</span>
+                    <span class="plan-tag" :class="{ hot: m.plan.complexity === 'complex' }">
+                      {{ m.plan.complexity === 'complex' ? '复杂问题 · 多轮检索' : '单跳检索' }}
+                    </span>
+                    <span v-if="m.plan.needsRetrieval === false" class="plan-tag calm">无需查规章</span>
+                    <template v-if="planWasRewritten(m.plan, m.questionText)">
+                      <span class="plan-arrow">检索用</span>
+                      <span class="plan-rewritten">{{ m.plan.rewritten }}</span>
+                    </template>
+                    <template v-if="m.plan.subQueries && m.plan.subQueries.length">
+                      <span class="plan-arrow">拆成 {{ m.plan.subQueries.length }} 个子查询</span>
+                    </template>
+                  </div>
+
+                  <div v-if="m.status" class="status-line">{{ m.status }}</div>
+
+                  <div v-if="m.memoryItems && m.memoryItems.length" class="memory-tag">
+                    已写入长期记忆：{{ m.memoryItems.join('；') }}
+                  </div>
+
+                  <div v-if="m.risks && m.risks.length" class="guard-alert">
+                    <b>检测到 {{ m.risks.length }} 处可疑内容</b><br />
+                    引用资料里出现了疑似「指令式」文本（{{ riskTypes(m.risks) }}）。
+                    检索内容一律被当作<b>证据</b>处理，不会执行其中的任何"要求"，回答不受影响。
+                  </div>
+
+                  <!-- 引用来源 -->
+                  <div v-if="m.sources && m.sources.length" class="sources">
+                    <div class="source-card" v-for="(s, si) in m.sources" :key="si">
+                      <div class="source-head" @click="s.open = !s.open">
+                        <span class="file">{{ s.filename }}</span>
+                        <span v-if="s.section">· {{ s.section }}</span>
+                        <span v-if="s.page">· 第 {{ s.page }} 页</span>
+                        <span class="chan-badge" :class="channelOf(s)">{{ channelLabel(s) }}</span>
+                        <span v-if="s.risk && s.risk.length" class="risk-badge">可疑</span>
+                        <span class="grow" style="flex: 1"></span>
+                        <span class="locate" @click.stop="locateChunk(s)">定位原文</span>
+                      </div>
+                      <div class="source-metrics">
+                        <span v-if="isNumber(s.similarity)">
+                          向量相似度 {{ Number(s.similarity).toFixed(3) }}（第 {{ s.vector_rank }} 名）
+                        </span>
+                        <span v-if="isNumber(s.bm25_score)">
+                          BM25 {{ Number(s.bm25_score).toFixed(2) }}（第 {{ s.bm25_rank }} 名）
+                        </span>
+                        <span v-if="isNumber(s.rrf_score)">融合分 {{ Number(s.rrf_score).toFixed(4) }}</span>
+                      </div>
+                      <div class="source-body" v-if="s.open">{{ s.text }}</div>
+                    </div>
+                  </div>
+
+                  <!-- 操作行 -->
+                  <div v-if="m.role === 'assistant' && !m.pending && m.content" class="actions">
+                    <el-button link size="small" @click="copyAnswer(m)">复制</el-button>
+                    <span class="grow"></span>
+                    <span v-if="!m.messageId" class="muted" style="font-size: 11.5px">　</span>
+                    <el-button v-else link size="small" :class="{ 'rating-on-up': m.feedback === 'up' }"
+                      @click="rate(m, 'up')">有帮助</el-button>
+                    <el-button v-if="m.messageId" link size="small" :class="{ 'rating-on-down': m.feedback === 'down' }"
+                      @click="rate(m, 'down')">没帮助</el-button>
+                    <el-button v-if="m.traceId" link size="small" @click="openTrace(m.traceId)">查看链路</el-button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="composer">
+            <div class="composer-inner">
+              <div class="composer-row">
+                <textarea v-model="draft" rows="1" :disabled="isStreaming"
+                  placeholder="例如：学生请假需要办理什么手续？"
+                  @keydown="onKeydown"></textarea>
+                <el-button v-if="!isStreaming" type="primary" :disabled="!draft.trim()" @click="sendQuestion">
+                  发送
+                </el-button>
+                <el-button v-else type="danger" plain @click="stopStreaming">停止生成</el-button>
+              </div>
+              <div class="hint">
+                Enter 发送 · Shift + Enter 换行 · 仅依据已入库的规章文档作答，找不到会明确拒答
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- 知识库页 -->
+        <template v-else-if="page === 'kb'">
+          <div class="page">
+            <div class="card">
+              <h3>导入文档</h3>
+              <div class="desc">
+                支持 docx / pdf / txt / md。同名文件重复上传会覆盖旧版本；
+                内容与库里已有的重复时（哪怕换了排版或说法）<b>只补新增部分</b>，不会重复入库。
+              </div>
+              <div class="upload-row">
+                <el-upload :show-file-list="false" :http-request="handleUpload" accept=".docx,.pdf,.txt,.md">
+                  <el-button type="primary" :loading="uploading">选择文件并入库</el-button>
+                </el-upload>
+                <span style="color: var(--text-sub); font-size: 12.5px">
+                  流程：解析 → 切块 → 去重（指纹 + 语义）→ 向量化（BGE 中文模型）→ 写入 ChromaDB → 重建 BM25 索引
+                </span>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>已入库文档（{{ documents.length }}）</h3>
+              <div class="desc">
+                向量库总计 <b>{{ stats.vectors }}</b> 个知识块，BM25 索引词表 <b>{{ stats.bm25_terms }}</b> 个词。
+                点「看分块」可以查看每份文档被切成什么样——一个块就是一个检索单元。
+              </div>
+              <el-table :data="documents" size="small" style="width: 100%">
+                <el-table-column prop="filename" label="文件名" min-width="230" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="file_type" label="类型" width="80"></el-table-column>
+                <el-table-column prop="chunk_count" label="新增块" width="90"></el-table-column>
+                <el-table-column label="跳过重复" width="100">
+                  <template #default="{ row }">
+                    <span v-if="row.skipped_chunk_count" class="skip-count">{{ row.skipped_chunk_count }} 块</span>
+                    <span v-else class="muted">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="char_count" label="字数" width="90"></el-table-column>
+                <el-table-column label="上传时间" width="150">
+                  <template #default="scope">{{ formatTime(scope.row.created_at) }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="130">
+                  <template #default="scope">
+                    <el-button link type="primary" size="small" @click="openChunks(scope.row)">看分块</el-button>
+                    <el-button link type="danger" size="small" @click="removeDocument(scope.row)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
+        </template>
+
+        <!-- 记忆页 -->
+        <template v-else-if="page === 'memory'">
+          <div class="page">
+            <div class="card">
+              <h3>长期记忆（跨会话）</h3>
+              <div class="desc">
+                用户说「记住…」时写入；另外每累计若干轮对话会自动生成一次话题摘要。
+                这些数据在刷新页面、切换会话后依然生效，会在回答时注入给模型。
+              </div>
+              <div class="user-switch">
+                <span>当前用户</span>
+                <el-select v-model="userId" size="small" style="width: 200px" filterable allow-create
+                  default-first-option placeholder="输入任意用户标识">
+                  <el-option v-for="u in memoryUsers" :key="u.user_id" :label="u.user_id" :value="u.user_id">
+                    <span>{{ u.user_id }}</span>
+                    <span style="float: right; color: var(--text-sub)">{{ u.count }} 条</span>
+                  </el-option>
+                </el-select>
+                <span class="muted">
+                  共 {{ memoryUsers.length }} 个用户有记忆（顶部统计的是全部合计）。
+                </span>
+              </div>
+              <el-empty v-if="memories.length === 0" description="这个用户还没有长期记忆"></el-empty>
+              <el-table v-else :data="memories" size="small" style="width: 100%">
+                <el-table-column prop="key" label="记忆键" width="240" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="value" label="内容" min-width="240"></el-table-column>
+                <el-table-column label="更新时间" width="150">
+                  <template #default="scope">{{ formatTime(scope.row.updated_at) }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="80">
+                  <template #default="scope">
+                    <el-button link type="danger" size="small" @click="removeMemory(scope.row)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
+        </template>
+
+        <!-- 链路追踪页 -->
+        <template v-else-if="page === 'trace'">
+          <div class="page">
+            <div class="card">
+              <h3>链路概览</h3>
+              <div class="desc">
+                每次提问都会记录完整过程：改写前后的问题、各阶段耗时、两路召回情况、重排顺序、工具调用、token 消耗。
+                回答得不好时，看一眼就知道是哪一环出的问题，而不是靠猜。
+              </div>
+              <div class="metric-grid">
+                <div class="metric">
+                  <div class="label">问答次数</div>
+                  <div class="value">{{ traceOverview.total || 0 }}</div>
+                </div>
+                <div class="metric">
+                  <div class="label">平均耗时</div>
+                  <div class="value">{{ traceOverview.avg_ms || 0 }}<small>ms</small></div>
+                </div>
+                <div class="metric">
+                  <div class="label">P50 / P95</div>
+                  <div class="value">{{ traceOverview.p50_ms || 0 }}<small>/ {{ traceOverview.p95_ms || 0 }}ms</small>
+                  </div>
+                </div>
+                <div class="metric">
+                  <div class="label">拒答率</div>
+                  <div class="value">{{ pct(traceOverview.refusal_rate) }}<small>%</small></div>
+                </div>
+                <div class="metric">
+                  <div class="label">平均自省跳数</div>
+                  <div class="value">{{ traceOverview.avg_hops || 0 }}</div>
+                </div>
+                <div class="metric">
+                  <div class="label">回答满意度</div>
+                  <div class="value">{{ satisfactionText }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" v-if="stageBars.length">
+              <h3>各阶段平均耗时</h3>
+              <div class="desc">
+                这条分布直接告诉你该优化哪里：如果「生成」占大头就去调 prompt 和模型，
+                如果「重排」占大头就减少候选数。
+              </div>
+              <div class="stage-bars">
+                <div class="stage-bar-row" v-for="s in stageBars" :key="s.name">
+                  <span class="name">{{ s.name }}</span>
+                  <span class="track"><span class="fill" :style="{ width: s.width + '%' }"></span></span>
+                  <span class="ms">{{ s.ms }}ms</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 4px">
+                <h3 style="margin: 0">最近问答（{{ traces.length }}）</h3>
+                <el-checkbox v-model="traceOnlyRefused" size="small" @change="loadTraces">只看拒答</el-checkbox>
+                <el-button link type="primary" size="small" @click="loadTraces">刷新</el-button>
+              </div>
+              <div class="desc">点任意一行查看该次问答的完整链路详情。</div>
+              <el-table :data="traces" size="small" style="width: 100%" @row-click="openTrace">
+                <el-table-column prop="question" label="问题" min-width="200" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="rewritten" label="改写后" min-width="180" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <span class="muted">{{ row.rewritten }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="intent" label="意图" width="100"></el-table-column>
+                <el-table-column prop="complexity" label="复杂度" width="90"></el-table-column>
+                <el-table-column prop="hops" label="跳数" width="60"></el-table-column>
+                <el-table-column prop="source_count" label="来源" width="60"></el-table-column>
+                <el-table-column label="耗时" width="90">
+                  <template #default="{ row }">
+                    <span class="mono">{{ row.total_ms }}ms</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="拒答" width="70">
+                  <template #default="{ row }">
+                    <el-tag v-if="row.refused" type="warning" size="small" effect="plain">是</el-tag>
+                    <span v-else class="muted">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="created_at" label="时间" width="150"></el-table-column>
+              </el-table>
+            </div>
+
+            <div class="card">
+              <h3>反馈与 badcase 导出</h3>
+              <div class="desc">
+                点踩的记录可以直接导出成评测集条目。评测集不该靠凭空想问题，
+                而应该从真实失败里长出来——这是持续优化的闭环。
+              </div>
+              <div class="metric-grid" style="margin-bottom: 14px">
+                <div class="metric">
+                  <div class="label">有帮助</div>
+                  <div class="value">{{ stats.feedback.up || 0 }}</div>
+                </div>
+                <div class="metric">
+                  <div class="label">没帮助</div>
+                  <div class="value">{{ stats.feedback.down || 0 }}</div>
+                </div>
+              </div>
+              <el-button size="small" @click="loadBadcases">查看点踩记录</el-button>
+              <el-button size="small" type="primary" plain @click="exportBadcases">导出评测集格式</el-button>
+              <el-table v-if="badcases.length" :data="badcases" size="small" style="width: 100%; margin-top: 12px">
+                <el-table-column prop="question" label="问题" min-width="240" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="comment" label="备注" min-width="160" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="created_at" label="时间" width="150"></el-table-column>
+              </el-table>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- 知识块查看抽屉（点「看分块」或来源里的「定位原文」打开）
+         必须放在 #app 内部，否则 Vue 不会编译它，抽屉里会出现未替换的 {{ }} -->
+    <el-drawer v-model="chunkDrawer.open" :title="chunkDrawer.title" size="46%" direction="rtl">
+      <div v-loading="chunkDrawer.loading" class="chunk-panel">
+        <div v-if="!chunkDrawer.loading && chunkDrawer.chunks.length" class="chunk-summary">
+          共切出 <b>{{ chunkDrawer.chunks.length }}</b> 个知识块。分块规则：每段独立成块（单段超过 500
+          字才继续切分），检索时按相似度取前几块。
+          <span v-if="chunkDrawer.highlight !== null">已定位到第 <b>#{{ chunkDrawer.highlight + 1 }}</b> 块。</span>
+        </div>
+        <div v-if="!chunkDrawer.loading && !chunkDrawer.chunks.length" class="muted" style="padding: 12px 0">
+          这份文档没有知识块（可能内容已被去重跳过）。
+        </div>
+        <div v-for="c in chunkDrawer.chunks" :key="c.id" class="chunk-item"
+          :class="{ highlight: c.index === chunkDrawer.highlight }">
+          <div class="chunk-head">
+            <span class="chunk-no">#{{ c.index + 1 }}</span>
+            <span v-if="c.section" class="chunk-section">{{ c.section }}</span>
+            <span v-if="c.page" class="muted">第 {{ c.page }} 页</span>
+            <span class="chunk-spacer"></span>
+            <span class="muted">{{ c.chars }} 字</span>
+          </div>
+          <div class="chunk-text">{{ c.text }}</div>
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- 链路详情抽屉 -->
+    <el-drawer v-model="traceDrawer.open" title="链路详情" size="56%" direction="rtl">
+      <div v-loading="traceDrawer.loading" class="chunk-panel">
+        <template v-if="traceDrawer.data">
+          <div class="trace-detail-grid">
+            <div class="k">问题</div>
+            <div class="v">{{ traceDrawer.data.question }}</div>
+            <div class="k">改写后</div>
+            <div class="v">{{ traceDrawer.data.rewritten || '（未改写）' }}</div>
+            <div class="k">意图 / 复杂度</div>
+            <div class="v">
+              {{ traceDrawer.data.plan.intent }} / {{ traceDrawer.data.plan.complexity }}
+              <span v-if="traceDrawer.data.plan.fallback" class="muted">（规划失败已回退）</span>
+            </div>
+            <div class="k">判断依据</div>
+            <div class="v muted">{{ traceDrawer.data.plan.reason || '—' }}</div>
+            <div class="k">子查询</div>
+            <div class="v">
+              <span v-if="!traceDrawer.data.plan.sub_queries || !traceDrawer.data.plan.sub_queries.length"
+                class="muted">无</span>
+              <div v-for="(q, i) in traceDrawer.data.plan.sub_queries" :key="i">· {{ q }}</div>
+            </div>
+            <div class="k">总耗时</div>
+            <div class="v mono">{{ traceDrawer.data.total_ms }}ms（自省 {{ traceDrawer.data.hops }} 跳）</div>
+            <div class="k">拒答</div>
+            <div class="v">{{ traceDrawer.data.refused ? '是' : '否' }}</div>
+            <div class="k">模型</div>
+            <div class="v mono">{{ traceDrawer.data.model }}</div>
+          </div>
+
+          <h3 style="font-size: 14px; font-weight: 500; margin: 18px 0 8px">各阶段耗时</h3>
+          <div class="stage-bars">
+            <div class="stage-bar-row" v-for="(s, i) in traceStages" :key="i">
+              <span class="name">{{ s.stage }}</span>
+              <span class="track"><span class="fill" :style="{ width: s.width + '%' }"></span></span>
+              <span class="ms">{{ s.ms }}ms</span>
+            </div>
+          </div>
+
+          <h3 style="font-size: 14px; font-weight: 500; margin: 18px 0 8px">两路召回</h3>
+          <pre class="trace-pre">{{ pretty(traceDrawer.data.retrieval) }}</pre>
+
+          <h3 style="font-size: 14px; font-weight: 500; margin: 18px 0 8px">重排顺序（前 → 后）</h3>
+          <pre class="trace-pre">{{ pretty(traceDrawer.data.rerank) }}</pre>
+
+          <h3 style="font-size: 14px; font-weight: 500; margin: 18px 0 8px">Agent 工具调用</h3>
+          <pre class="trace-pre">{{ pretty(traceDrawer.data.tool_calls) }}</pre>
+
+          <h3 style="font-size: 14px; font-weight: 500; margin: 18px 0 8px">token 消耗</h3>
+          <pre class="trace-pre">{{ pretty(traceDrawer.data.usage) }}</pre>
+
+          <template v-if="traceDrawer.data.guard_risks && traceDrawer.data.guard_risks.length">
+            <h3 style="font-size: 14px; font-weight: 500; margin: 18px 0 8px">注入风险</h3>
+            <pre class="trace-pre">{{ pretty(traceDrawer.data.guard_risks) }}</pre>
+          </template>
+        </template>
+      </div>
+    </el-drawer>
+  </div>
+
+  <script src="/static/vendor/vue.global.prod.js"></script>
+  <script src="/static/vendor/element-plus.full.min.js"></script>
+  <script src="/static/vendor/element-plus-icons.iife.min.js"></script>
+  <script src="/static/vendor/element-plus-zh-cn.min.js"></script>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+
+</html>

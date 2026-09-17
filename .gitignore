@@ -1,0 +1,44 @@
+# ---------- 密钥（最重要的一条）----------
+# backend/.env 里放着真实的 DEEPSEEK_API_KEY，绝不能进仓库。
+# 需要让别人知道要配哪些变量，看 backend/.env.example。
+.env
+.env.local
+*.env
+!.env.example
+
+# ---------- 运行时数据 ----------
+# data/ 下的东西全是「跑起来就会自己生成」的：
+#   chroma/    向量库（20MB）
+#   uploads/   上传的原始文档
+#   school.db  会话与消息
+#   bm25_index.json  BM25 索引（由向量库派生，删了会自动重建）
+# 它们可以随时重建，放进仓库只会让仓库变重、diff 变脏。
+backend/data/
+data/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- 评测产物 ----------
+# 评测结果是本机跑出来的快照，用来做前后对比，但不必进版本库
+eval_result_*.json
+
+# ---------- IDE / 系统 ----------
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---------- 日志与临时文件 ----------
+*.log
+*.tmp
+~$*

@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+pydantic-settings
+sqlalchemy>=2.0
+aiosqlite
+chromadb
+sentence-transformers
+transformers
+torch
+langchain-text-splitters
+openai
+pypdf
+python-docx
+httpx
