@@ -1538,7 +1538,8 @@ svg {
   line-height: 1.65;
   color: var(--text);
   resize: vertical;
-  min-height: 62px;
+  /* 高度要容下 placeholder 的 3 行示例，否则第二行会被裁掉半截 */
+  min-height: 96px;
   outline: none;
   transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
 }

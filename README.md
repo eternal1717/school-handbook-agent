@@ -21,6 +21,42 @@
 
 ---
 
+## 界面
+
+**问答 —— 给出带条款出处的答案，手册里没写的就明说没写**
+
+图中这道题是「考试违纪和考试作弊，处理结果有什么区别」。回答按「共同点 / 不同点」
+组织，逐条标注出处章节；末尾主动说明「一般考试违纪对应的具体处分种类，手册中没有
+找到相应内容」——**这正是想要的：查到什么讲什么，查不到不编。**
+
+下方那条流水是本次问答的真实耗时（理解 2519ms / 多轮检索 50ms / 重排 1392ms /
+自查 886ms / 生成 4866ms），五条来源全部标着「双路命中」，每条都能点「定位原文」回查。
+
+<img src="docs/screenshots/00-chat.png" width="900">
+
+<table>
+<tr>
+<td width="50%"><b>规则诊断</b><br>用自己的话描述情况，匹配相关条文并做数值比对</td>
+<td width="50%"><b>办事流程</b><br>从原文抽出的办理步骤，勾选框可当待办清单</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/02-rules.png"></td>
+<td><img src="docs/screenshots/03-proc.png"></td>
+</tr>
+<tr>
+<td><b>链路追踪</b><br>每阶段耗时分布、拒答率、P50 / P95，每次问答都能回放</td>
+<td><b>首页</b><br>能力概览与建议问题，左边是全部会话</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/04-trace.png"></td>
+<td><img src="docs/screenshots/01-home.png"></td>
+</tr>
+</table>
+
+可切换亮色 / 暗色主题，选择会记住；地址栏 `#rules`、`#proc`、`#trace` 可直接定位到对应页面。
+
+---
+
 ## 一次问答里到底发生了什么
 
 ```
@@ -315,10 +351,12 @@ school-handbook-agent/
 │   ├── data/                        # sqlite / chroma / uploads（运行时生成，不入库）
 │   ├── static/                      # 免安装前端：index.html + styles.css + app.js
 │   │   └── vendor/                  # Vue / Element Plus / marked（本地文件，刻意入库）
-│   ├── tests/                       # 自测、评测、静态检查（见「自测」一节）
+│   ├── tests/                       # 自测、评测、静态检查、截图、演示数据整理
 │   ├── ingest.py                    # 批量导入脚本
 │   ├── run.py                       # 启动入口
 │   └── .env                         # 密钥与参数（不提交到 Git）
+├── docs/screenshots/                 # README 里用到的界面截图
+├── README.md                         # 本文件
 ├── PYCHARM.md                        # PyCharm 运行配置说明
 └── .gitignore
 ```
@@ -551,6 +589,7 @@ D:\python\python.exe tests\verify_observability.py     # 反馈闭环 + 链路�
 D:\python\python.exe tests\smoke_test.py               # 端到端回归
 D:\python\python.exe tests\test_incremental_dedup.py   # 增量去重专项
 D:\python\python.exe tests\calibrate_dedup.py          # 看语义去重的相似度分布
+D:\python\python.exe tests\seed_demo.py                # 演示数据整理（去重 + 统一归属，默认只报告）
 node tests\check_frontend.js                          # 前端静态检查（改完界面跑一下）
 node tests\vendor_diag.js                             # 第三方库加载诊断（页面白屏/出花括号时跑）
 
@@ -579,6 +618,23 @@ D:\python\python.exe tests\ui_shot.py --url "http://127.0.0.1:8000/#trace" --out
 它走 CDP 驱动系统自带的 Edge（不下载 Chromium），所以能注入 JS 做交互后再截图——
 「点开一条历史会话，看思维链和阶段流水有没有正常渲染」这种验证只能这么做。
 静态检查全过但界面是坏的，实测遇到过两次，都是 CSS 尺寸失效，见「前端」一节。
+
+`seed_demo.py` 是给「要拿给人看」的场景做收尾的，处理两个开发期攒下来的噪声：
+
+- **重复会话**：同一条问题会被反复问（「本科最长可以读几年？」问过 7 遍），
+  会话列表于是堆了上百条重复项。按标题去重，每个标题只留最新一次，
+  连同它的 message / trace / feedback 一起留下。
+- **归属散落**：不同测试脚本各自用了自己的 `user_id`（`eval_user` / `verify_user` /
+  `probe2` …），结果前端默认用户反而只看到 3 条。这一步把它们统一到 `default_user`。
+
+它**默认只打印「会保留什么、会删什么」，加 `--apply` 才真正执行**，且执行前自动备份整个数据库
+（存到 `data/backup/`）。实测把 139 条会话整理成 36 条，留下的是正常问答 / 多跳推理 /
+越界提问 / 提示注入 / 闲聊各一类——这些恰恰最能说明系统的分流与防护能力，所以留着而不是清空。
+
+```bash
+D:\python\python.exe tests\seed_demo.py                                        # 预览，不动数据
+D:\python\python.exe tests\seed_demo.py --apply --unify-user default_user       # 执行（先自动备份）
+```
 
 ## 手动导入手册
 

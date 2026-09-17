@@ -134,6 +134,16 @@ D:\python\python.exe tests\ui_shot.py --url http://127.0.0.1:8000/ --out shot.pn
 > `ui_shot.py` 常用参数：`--js "代码"` 可以先执行一段 JS 再截图（比如点开某个页面），
 > `--wait 3` 控制等待秒数，`--serve` 会顺手把服务也拉起来。
 
+想把会话列表收拾干净（开发期同一条问题会被反复问，会留一堆重复）：
+
+```
+D:\python\python.exe tests\seed_demo.py                                      先看会动什么，不改数据
+D:\python\python.exe tests\seed_demo.py --apply --unify-user default_user    真正执行（会先自动备份数据库）
+```
+
+> 它做两件事：按标题去重（每个标题只留最新一次）、把散落在多个测试用户名下的
+> 会话统一归到 `default_user`。备份放在 `backend\data\backup\`，随时能退回去。
+
 ---
 
 ## 常见问题
