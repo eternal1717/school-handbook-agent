@@ -137,10 +137,13 @@ async def _ingest_file_unlocked(db: AsyncSession, path: Path, original_name: str
     added = await run_sync(vector_store.add_chunks, doc_id, filename, chunks, embeddings)
     vector_total = await run_sync(vector_store.count)
 
-    # 向量库变了，BM25 索引就过期了。这里只置空标记，不立即重建——
-    # 下一次检索时 get_bm25() 会发现条数对不上，自动重建。
+    # 向量库变了，BM25 索引和规则库都过期了。这里只置空标记，不立即重建——
+    # 下一次用到时会发现条数对不上，自动重建。
     # 好处是连续上传多份文件时只重建一次，而不是每份都重建。
+    # 规则库这一行不能省：新传进来的规章必须能被抽成规则和办事流程，
+    # 否则「规则诊断」「办事流程」两个页面会一直显示旧文档的内容。
     hybrid.invalidate_bm25()
+    rulebook.invalidate()
     document = KnowledgeDocument(
         id=doc_id,
         filename=filename,

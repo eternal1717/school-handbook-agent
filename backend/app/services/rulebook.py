@@ -600,8 +600,16 @@ def get_rulebook() -> dict:
     按「块数是否一致」判断缓存是否过期——比维护增量更新可靠得多。
     """
     global _rulebook
-    if _rulebook is not None:
+    expected = _count_chunks()
+
+    # 内存缓存也要校验块数（对齐 get_bm25 的做法）。
+    # 只靠调用方记得 invalidate 是不够的：多进程、脚本直接入库、
+    # 以后新增的入库入口，任何一个漏了都会让规则库一直用旧数据，
+    # 表现成「新传的文档怎么都抽不出规则」——这种问题很难查。
+    # count() 是 Chroma 的内部计数，很便宜，换来的是永远不用旧数据。
+    if _rulebook is not None and _rulebook.get("chunk_total") == expected:
         return _rulebook
+    _rulebook = None
 
     path = settings.rulebook_path_resolved
     if path.exists():
@@ -614,7 +622,7 @@ def get_rulebook() -> dict:
         # 少了后一条，改完模板跑起来会发现结果没变（旧缓存还在用），
         # 很容易误判成「代码没生效」而白白排查半天。
         if (cached
-                and cached.get("chunk_total") == _count_chunks()
+                and cached.get("chunk_total") == expected
                 and cached.get("extractor_version") == EXTRACTOR_VERSION):
             _rulebook = cached
             return _rulebook
