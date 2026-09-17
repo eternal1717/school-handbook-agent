@@ -29,8 +29,11 @@ school-handbook-agent
 │   ├── data/         school.db + chroma + uploads（运行时生成，不入 Git）
 │   ├── run.py        启动入口
 │   ├── ingest.py     批量导入手册
+│   ├── .env.example  配置样例（复制成 .env 再填 Key）
 │   └── tests/        自测、评测、静态检查脚本
-├── README.md
+├── docs/
+│   └── DESIGN.md     为什么这么设计、踩过哪些坑（面试可讲的那部分）
+├── README.md         怎么跑、怎么用
 ├── PYCHARM.md        本文件
 ├── .gitignore
 └── .gitattributes
@@ -167,13 +170,21 @@ taskkill /F /PID <上面查到的PID>
 ```
 
 **Q：页面上写着「演示模式」**
-正常。当前 `backend\.env` 里没填 `DEEPSEEK_API_KEY`，所以回答由检索到的原文片段拼成，
+
+说明 `backend\.env` 里没读到可用的 `DEEPSEEK_API_KEY`，此时回答由检索到的原文片段拼成，
 链路完整但不调用大模型。填上 Key 重启即可获得完整自然语言回答：
 
 ```
 # backend\.env
 DEEPSEEK_API_KEY=sk-xxxxxxxx
 ```
+
+> 先确认配置文件本身在不在：`dir backend\.env`。
+> 如果只有 `.env.example`，先复制一份再填：
+>
+> ```
+> copy backend\.env.example backend\.env
+> ```
 
 **Q：回答里出现 `[调用大模型失败] Connection error.`**
 
@@ -184,8 +195,10 @@ DEEPSEEK_API_KEY=sk-xxxxxxxx
 
 **Q：回答是空的**
 
-`backend\.env` 里把 `LLM_MAX_TOKENS` 调到 `4096` 后重启。
-原因：`deepseek-flash` 是推理模型，思维链会占用 `max_tokens` 额度，给少了正文就被挤空。
+`backend\.env` 里把 `LLM_MAX_TOKENS` 调到 `8192` 后重启。
+原因：`deepseek-flash` 是推理模型，思维链和正文**共享** `max_tokens` 额度，
+给少了额度全被思维链吃掉，正文一个字都出不来。实测 2048 必被吃光，4096 也在边界上，
+所以默认给 8192。
 
 **Q：改了代码要重启吗**
 要。`run.py` 里 `reload=False`，改完按 `Ctrl+F5` 重新运行即可。
